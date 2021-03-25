@@ -1,0 +1,177 @@
+library(readxl)   
+install.packages("openxlsx")    
+library(openxlsx)    
+install.packages("car")   
+library(car)    
+library(dplyr)    
+install.packages("tidyverse")   
+library(tidyverse)   
+install.packages("numDeriv")   
+library(numDeriv)   
+install.packages("alabama")  
+library(alabama)   
+install.packages("VGAM")   
+library(stats4)  
+library(splines)  
+library(VGAM)   
+
+setwd("~/YEAR3 DAM PROJECT/SEASONS")
+  
+s1819<- read.csv("S1819.csv",header=TRUE)    
+  
+#Removing variables after column 23 to reduce the dataset   
+  
+s1819reduced<-select(s1819,-c(8:62))    
+
+#Step 1 to fit the poisson model- Renaming variables in the data frame and making adjustments    
+df <- apply(s1819reduced, 1, function(row){data.frame(team=c(row['HomeTeam'], row['AwayTeam']), opponent=c(row['AwayTeam'], row['HomeTeam']), goals=c(row['FTHG'], row['FTAG']), home=c(1, 0),result=c(row['FTR'],row['FTR']))})    
+  
+df <- do.call(rbind, df)    
+head(df)    
+df$goals <- as.numeric(df$goals)    
+  
+str(df)    
+
+# Note it is 152 instead of 76 as each match is represented twice 
+df_train <- head(df, -152)  
+df_test <- tail(df, 152)  
+  
+#Fitting the poisson model using the 'df' data from above    
+model <- glm(goals~ home + team + opponent, family=poisson(link=log), data=df_train)   
+summary(model)   
+  
+# Modified test set matrix 
+df_test2 <- df_test %>% mutate( 
+  probhome=NA, 
+  probdraw=NA, 
+  probaway=NA, 
+  prediction=NA, 
+  correct=NA 
+) 
+# Range of goals 'allowed' under the model 
+plotrange <- 0:8 
+  
+# Loop so that results can be easily obtained for all games in test set 
+for (i in 1:nrow(df_test2)){ 
+  if(i %% 2 != 0){ 
+# Home team 
+    team_a <- df_test2$team[i] 
+    
+# Away team 
+    team_b <- df_test2$opponent[i] 
+    
+#expected number of goals for both teams   
+    predictHome <- as.numeric(paste(predict(model, data.frame(home=1, team=team_a, opponent=team_b), type="response")))  
+    predictAway <- as.numeric(paste(predict(model, data.frame(home=0, team=team_b, opponent=team_a), type="response"))) 
+     
+     
+print(predictHome)   
+print(predictAway)   
+  
+#plot the poisson distributions   
+  
+plotrange <- 0:8 
+  
+hp <- dpois(plotrange, predictHome)   
+ap <- dpois(plotrange, predictAway)   
+  
+plot(plotrange, hp, type="b", ylim=range(hp, ap), main="Goals, Brighton vs Southampton", xlab="Number of goals", ylab="Probability")   
+  
+points(plotrange, ap, type="b", pch=24)   
+  
+legend(x=6, y=0.8, legend=c("Brighton", "Southampton"), pch=c(21, 24))   
+  
+  
+#Probability per goal   
+  
+dpois(0:8, predictHome)   
+dpois(0:8, predictAway)   
+  
+#Calculate probability of scores matrix    
+  
+scores <- dpois(0:8, predictHome) %o% dpois(0:8, predictAway)   
+  
+rownames(scores) <- 0:8  
+colnames(scores) <- 0:8 
+  
+# Calculate the percentage of Home win, draw or Away win  
+     
+probhome <- sum(scores[lower.tri(scores)]) 
+probdraw <- sum(diag(scores))  
+probaway <- sum(scores[upper.tri(scores)])  
+  
+# Add this info to table 
+df_test2$probhome[i] <- probhome 
+df_test2$probhome[i+1] <- probhome 
+     
+df_test2$probdraw[i] <- probdraw 
+df_test2$probdraw[i+1] <- probdraw 
+     
+df_test2$probaway[i] <- probaway 
+df_test2$probaway[i+1] <- probaway 
+    
+# Display these probabilities as percentages at each step in the loop (each game in test set) 
+ cat('pronhome: ', probhome*100, '%')  
+cat('probdraw: ', probdraw*100, '%')  
+cat('probaway: ', probaway*100, '%')  
+  
+df_test2$prediction[i] <- ifelse(probhome>probaway&&probhome>probdraw,'H',ifelse(probaway>probhome&&probaway>probdraw,'A','D')) 
+    df_test2$correct[i] <- ifelse(df_test2$prediction[i]==df_test2$result[i],1,0) 
+    df_test2$prediction[i+1] <- df_test2$prediction[i] 
+    df_test2$correct[i+1] <- df_test2$correct[i] 
+     
+     
+    print(i) 
+  } 
+} 
+odd_indices <- seq(1,151,2) 
+
+# Sort to remove duplicates 
+df_test2edit <- df_test2[odd_indices,] 
+accuracy_poi <- sum(df_test2edit$correct)/nrow(df_test2edit) 
+
+accuracy_poi
+view(df_test2edit)
+
+#Skellam distributions 
+
+#Goal difference, skellam distribution 
+goalDiffRange <- -6:6 
+plot(goalDiffRange, dskellam(goalDiffRange, predictHome, predictAway), type="b", main="Goal difference, Brighton vs Southampton", ylab="Probability", xlab="Goal difference") 
+
+#Away 
+AwaySkellam <- sum(dskellam(-100:-1, predictHome, predictAway))  
+
+#Home 
+HomeSkellam <- sum(dskellam(1:100, predictHome, predictAway))  
+
+#Draw 
+DrawSkellam <- sum(dskellam(0, predictHome, predictAway))  
+
+print(AwaySkellam) 
+print(HomeSkellam) 
+print(DrawSkellam) 
+
+#Simulation 
+set.seed(915706074) 
+nsim <- 10000 
+homeGoalsSim <- rpois(nsim, predictHome) 
+awayGoalsSim <- rpois(nsim, predictAway) 
+goalDiffSim <- homeGoalsSim - awayGoalsSim 
+
+#Home 
+HomeWin <- sum(goalDiffSim > 0) / nsim  
+
+#Draw 
+Draw <- sum(goalDiffSim == 0) / nsim  
+
+#Away 
+AwayWin <- sum(goalDiffSim < 0) / nsim  
+
+print(HomeWin) 
+print(Draw) 
+print(AwayWin) 
+
+ 
+
+

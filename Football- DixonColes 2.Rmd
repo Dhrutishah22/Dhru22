@@ -1,0 +1,221 @@
+library(readxl)  
+install.packages("openxlsx")   
+library(openxlsx)  
+install.packages("car")  
+library(car)   
+library(dplyr)   
+install.packages("tidyverse")  
+library(tidyverse)  
+install.packages("numDeriv")  
+library(numDeriv)  
+install.packages("alabama")  
+library(alabama)  
+
+setwd("~/YEAR3 DAM PROJECT/SEASONS")  
+
+s1819<- read.csv("S1819.csv",header=TRUE)
+sp1819 <- read.csv("SP1819.csv", header=TRUE)
+i1819 <- read.csv("I1819.csv", header=TRUE)
+
+#Removing variables after column 23 to reduce the dataset  
+s1819reduced<-select(s1819,-c(8:62))  
+sp1819reduced <- select(sp1819, -c(8:61))
+i1819reduced <- select(i1819, -c(8:61))
+
+#Setting training and testing data 
+df_train <- head(s1819reduced, -76)  
+df_test <- tail (s1819reduced, 76)  
+
+df_train <- head(sp1819reduced, -80)  
+df_test <- tail (sp1819reduced, 80)
+
+df_train <- head(i1819reduced, -71)  
+df_test <- tail(i1819reduced, 71)  
+
+#Implement the function 'tau'which is dependent on the parameter Rho.   
+tau <- Vectorize(function(xx, yy, lambda, mu, rho){  
+  if (xx == 0 & yy == 0){return(1 - (lambda*mu*rho))  
+  } else if (xx == 0 & yy == 1){return(1 + (lambda*rho))  
+  } else if (xx == 1 & yy == 0){return(1 + (mu*rho))  
+  } else if (xx == 1 & yy == 1){return(1 - rho)  
+  } else {return(1)}  
+})  
+
+#Compute the log-likelihood function from the above function  
+DClogLik <- function(y1, y2, lambda, mu, rho=0){  
+  #rho=0, independence  
+  #y1: home goals  
+  #y2: away goals  
+  sum(log(tau(y1, y2, lambda, mu, rho)) + log(dpois(y1, lambda)) + log(dpois(y2, mu)))  
+}  
+
+  
+#Format the data similar to the data frame in S1819 and return the list  
+DCmodelData <- function(df_train){  
+
+  hm <- model.matrix(~ HomeTeam - 1, data=df_train, contrasts.arg=list(HomeTeam='contr.treatment'))  
+  am <- model.matrix(~ AwayTeam -1, data=df_train)  
+
+  team.names <- unique(c(levels(df_train$HomeTeam), levels(df_train$AwayTeam)))  
+
+  return(list(  
+    HomeTeamDM=hm,  
+    AwayTeamDM=am,  
+    HomeGoals=df_train$FTHG,  
+    AwayGoals=df_train$FTAG,  
+    teams=team.names  
+  ))   
+}  
+
+#Compute a function that find parameters that maximise the log-likelihood  
+DCoptimFn <- function(params, DCm){  
+
+  home.p <- params[1]  
+  rho.p <- params[2]  
+
+  nteams <- length(DCm$teams)  
+  attack.p <- matrix(params[3:(nteams+2)], ncol=1)  
+  defence.p <- matrix(params[(nteams+3):length(params)], ncol=1)  
+
+  lambda <- exp(DCm$HomeTeamDM %*% attack.p + DCm$AwayTeamDM %*% defence.p + home.p)  
+  mu <- exp(DCm$AwayTeamDM %*% attack.p + DCm$HomeTeamDM %*% defence.p)  
+
+  return(  
+    DClogLik(y1=DCm$HomeGoals, y2=DCm$AwayGoals, lambda, mu, rho.p) * -1)  
+}  
+
+#Ensure all attack parameters sum to 1 before optimising  
+DCattackConstr <- function(params, DCm, ...){  
+  nteams <- length(DCm$teams)  
+  attack.p <- matrix(params[3:(nteams+2)], ncol=1)  
+  return((sum(attack.p) / nteams) - 1)  
+}  
+
+#Load the data and use the DCmodelData function  
+dcm <- DCmodelData(df_test)  
+
+#Initial parameter estimates  
+attack.params <- rep(.01, times=nlevels(df_test$HomeTeam))  
+defence.params <- rep(-0.08, times=nlevels(df_test$HomeTeam))  
+home.param <- 0.06  
+rho.init <- 0.03  
+par.inits <- c(home.param, rho.init, attack.params, defence.params)  
+
+#Give the parameters some informative names   
+names(par.inits) <- c('HOME', 'RHO', paste('Attack', dcm$teams, sep='.'), paste('Defence', dcm$teams, sep='.'))  
+
+#Use the auglag function to optimise the function  
+res <- auglag(par=par.inits, fn=DCoptimFn, heq=DCattackConstr, DCm=dcm)  
+
+#Run the code to see the results of the attacks and defense parameters for each team  
+res$par 
+
+# Predictions for test set 
+info <- res$par 
+
+# Max goals defines maximum value of Poisson distributions for home goals, away goals 
+maxgoals = 8 
+
+tab <- as.data.frame(info) 
+
+HOME <- tab$info[1] 
+RHO <- tab$info[2] 
+Team <- levels(df_test$HomeTeam) 
+tab2 <- data.frame(Team)
+
+tab2 <- tab2 %>% mutate( 
+  attack=NA, 
+  defence=NA 
+) 
+
+# Get parameters into table (data frame) tab2 so they can be called up when needed 
+for (j in 1:20){ 
+  tab2$attack[j] = tab$info[j+2] 
+  tab2$defence[j] = tab$info[j+22] 
+} 
+
+# Make data frame which is test data table but with extra columns to store predictive probabilities and prediction 
+df_test2 <- df_test %>% mutate( 
+probhomewin = NA, 
+probdraw = NA, 
+probawaywin = NA, 
+prediction = NA, 
+correct = NA, 
+lambda = NA,
+mu = NA
+) 
+
+    for(i in 1:nrow(df_test)){ 
+#Call home team 'team_a' 
+  team_a <- df_test$HomeTeam[i] 
+
+# Call away team 'team_b' 
+  team_b <- df_test$AwayTeam[i] 
+
+# Extract attack, defence parameters for each team 
+  attack_a <- (tab2 %>% filter(Team==team_a))$attack 
+  defence_a <- (tab2 %>% filter(Team==team_a))$defence 
+  attack_b <- (tab2 %>% filter(Team==team_b))$attack 
+  defence_b <- (tab2 %>% filter(Team==team_b))$defence 
+
+# Expected Home goals  
+lambda <- exp(HOME + attack_a + defence_b)  
+df_test2$lambda[i] <- lambda 
+
+# Expected Away goals  
+mu <- exp(attack_b + defence_a)  
+df_test2$mu[i] <- mu   
+
+# Create matrix of probabilities called scores 
+scores <- dpois(0:maxgoals,lambda) %o% dpois(0:maxgoals,mu) 
+
+df_test2$probhomewin[i] = sum(scores[lower.tri(scores)]) 
+df_test2$probdraw[i] = sum(diag(scores)) 
+df_test2$probawaywin[i] = sum(scores[upper.tri(scores)]) 
+
+probhomewin = df_test2$probhomewin[i] 
+probdraw = df_test2$probdraw[i] 
+probawaywin = df_test2$probawaywin[i] 
+
+# Prediction of result 
+df_test2$prediction[i] <- ifelse(probhomewin>probawaywin&&probhomewin>probdraw,'H',ifelse(probawaywin>probhomewin&&probawaywin>probdraw,'A','D')) 
+
+df_test2$correct[i] <- ifelse(df_test2$prediction[i]==df_test2$FTR[i],1,0) 
+
+} 
+
+accuracy = sum(df_test2$correct)/nrow(df_test2) 
+
+accuracy
+
+view(df_test2)
+
+#Create a matrix to adjust for the low-scoring results  
+maxgoal <- 6  
+probability_matrix <- dpois(0:maxgoal, lambda) %*% t(dpois(0:maxgoal, mu))  
+print (probability_matrix)  
+
+#Create a matrix with scaling factors   
+scaling_matrix <- matrix(tau(c(0,1,0,1), c(0,0,1,1), lambda, mu, res$par['RHO']), nrow=2)  
+probability_matrix[1:2, 1:2] <- probability_matrix[1:2, 1:2] * scaling_matrix  
+print(scaling_matrix)  
+
+#Plot for goal difference
+awayG <- numeric(maxgoal)  
+ for (gg in 2:maxgoal){  
+  awayG[gg-1] <- sum(diag(probability_matrix[,gg:(maxgoal+1)]))  
+}  
+awayG[maxgoal] <- probability_matrix[1,(maxgoal+1)]  
+
+homeG <- numeric(maxgoal)  
+ for (gg in 2:maxgoal){  
+  homeG[gg-1] <- sum(diag(probability_matrix[gg:(maxgoal+1),]))  
+}  
+
+homeG[maxgoal] <- probability_matrix[(maxgoal+1),1]  
+
+goaldiffs <- c(rev(awayG), sum(diag(probability_matrix)), homeG)  
+names(goaldiffs) <- -maxgoal:maxgoal  
+
+plot(-maxgoal:maxgoal, goaldiffs, type='b', main="Goal difference, Southampton vs Brighton", ylab="Probability", xlab="Goal difference")  
+
